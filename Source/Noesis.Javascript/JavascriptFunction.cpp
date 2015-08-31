@@ -18,40 +18,29 @@ JavascriptFunction::JavascriptFunction( v8::Handle<v8::Object> iFunction, Javasc
 	if(!context)
 		throw gcnew System::ArgumentException("Must provide a JavascriptContext");
 
-	mFuncHandle = new Persistent<Function>();
-	*mFuncHandle = Persistent<Function>::New(Handle<Function>::Cast(iFunction));
+    v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+    mFuncHandle = new Persistent<Function>(isolate, Handle<Function>::Cast(iFunction));
 	mContext = context;
 }
 
 JavascriptFunction::~JavascriptFunction()
 {
-	if(mFuncHandle) 
-	{
-		JavascriptScope scope(mContext);
-		mFuncHandle->Dispose();
-		delete mFuncHandle;
-		mFuncHandle = nullptr;
-	}
-	System::GC::SuppressFinalize(this);
+    Destroy();
 }
 
-JavascriptFunction::!JavascriptFunction() 
+JavascriptFunction::!JavascriptFunction()
 {
-	if(mFuncHandle) 
-	{
-		JavascriptScope scope(mContext);
-		mFuncHandle->Dispose();
-		delete mFuncHandle;
-		mFuncHandle = nullptr;
-	}
+    Destroy();
 }
 
 System::Object^ JavascriptFunction::Call(... cli::array<System::Object^>^ args)
 {	
 	JavascriptScope scope(mContext);
-	HandleScope handleScope;
+    v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+    HandleScope handleScope(isolate);
 
-	Handle<v8::Object> global = (*mFuncHandle)->CreationContext()->Global();
+    Local<Function> pFunction = Local<Function>::New(isolate, *mFuncHandle);
+    Handle<v8::Object> global = pFunction->CreationContext()->Global();
 
 	int argc = args->Length;
 	Handle<v8::Value> *argv = new Handle<v8::Value>[argc];
@@ -60,7 +49,7 @@ System::Object^ JavascriptFunction::Call(... cli::array<System::Object^>^ args)
 		argv[i] = JavascriptInterop::ConvertToV8(args[i]);
 	}
 
-	Local<Value> retVal = (*mFuncHandle)->Call(global, argc, argv);
+    Local<Value> retVal = pFunction->Call(global, argc, argv);
 
 	delete [] argv;
 	return JavascriptInterop::ConvertFromV8(retVal);
@@ -71,8 +60,9 @@ bool JavascriptFunction::operator==( JavascriptFunction^ func1, JavascriptFuncti
 	if(ReferenceEquals(func2, nullptr)) {
 		return false;
 	}
-	Handle<Function> jsFuncPtr1 = *(func1->mFuncHandle);
-	Handle<Function> jsFuncPtr2 = *(func2->mFuncHandle);
+    v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+    Handle<Function> jsFuncPtr1 = Local<Function>::New(isolate, *(func1->mFuncHandle));
+    Handle<Function> jsFuncPtr2 = Local<Function>::New(isolate, *(func2->mFuncHandle));
 
 	return jsFuncPtr1->Equals(jsFuncPtr2);
 }
@@ -87,6 +77,17 @@ bool JavascriptFunction::Equals(Object^ other )
 	JavascriptFunction^ otherFunc = dynamic_cast<JavascriptFunction^>(other);
 	return (otherFunc && this->Equals(otherFunc));
 }
+
+void JavascriptFunction::Destroy()
+{
+    if (mFuncHandle)
+    {
+        if (mContext->GetCurrent() != nullptr && mContext->GetCurrentIsolate() != nullptr) JavascriptScope scope(mContext);
+        delete mFuncHandle;
+        mFuncHandle = nullptr;
+    }
+}
+
 
 } } // namespace Noesis::Javascript
 

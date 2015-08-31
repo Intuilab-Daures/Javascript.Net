@@ -53,11 +53,9 @@ Handle<ObjectTemplate>
 JavascriptInterop::NewObjectWrapperTemplate()
 {
 	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
-	HandleScope handleScope(isolate);
-
-	Handle<ObjectTemplate> result = ObjectTemplate::New();
-	result->SetInternalFieldCount(1);
-	result->SetNamedPropertyHandler(Getter, Setter);
+    Local<ObjectTemplate> result = ObjectTemplate::New(isolate);
+    result->SetInternalFieldCount(1);
+    result->SetNamedPropertyHandler(Getter, Setter);
 	result->SetIndexedPropertyHandler(IndexGetter, IndexSetter);
 	return result;
 }
@@ -212,10 +210,9 @@ JavascriptInterop::WrapObject(System::Object^ iObject)
 
 	if (context != nullptr)
 	{
-		Handle<ObjectTemplate> templ = context->GetObjectWrapperTemplate();
-		Handle<Object> object = templ->NewInstance();
-		object->SetInternalField(0, External::New(JavascriptContext::GetCurrentIsolate(), context->WrapObject(iObject)));
-
+        Local<ObjectTemplate> templ = context->GetObjectWrapperTemplate();
+		Local<Object> object = templ->NewInstance();
+        object->SetInternalField(0, External::New(JavascriptContext::GetCurrentIsolate(), context->WrapObject(iObject)));
 		return object;
 	}
 
@@ -464,7 +461,7 @@ void
 JavascriptInterop::Getter(Local<String> iName, const PropertyCallbackInfo<Value>& iInfo)
 {
 	wstring name = (wchar_t*) *String::Value(iName);
-	Handle<External> external = Handle<External>::Cast(iInfo.Holder()->GetInternalField(0));
+    Handle<External> external = Handle<External>::Cast(iInfo.Holder()->GetInternalField(0));
 	JavascriptExternal* wrapper = (JavascriptExternal*) external->Value();
 	Handle<Function> function;
 	Handle<Value> value;
@@ -485,7 +482,7 @@ JavascriptInterop::Getter(Local<String> iName, const PropertyCallbackInfo<Value>
 	// map toString with ToString
 	if (wstring((wchar_t*) *String::Value(iName)) == L"toString")
 	{
-		function = wrapper->GetMethod(L"ToString");
+		function = wrapper->GetMethod((wstring)L"ToString");
 		if (!function.IsEmpty()) {
 			iInfo.GetReturnValue().Set(function);
 			return;

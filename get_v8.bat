@@ -4,7 +4,7 @@
 @ECHO off
 
 :: V8 version to checkout
-SET tag=3.27.34.21
+SET tag=master
 
 :: drop custom python vars if any
 SET PYTHONHOME=

@@ -24,7 +24,7 @@ public ref class JavascriptFunction
 public:
 	JavascriptFunction(v8::Handle<v8::Object> iFunction, JavascriptContext^ context);
 	~JavascriptFunction();
-	!JavascriptFunction();
+    !JavascriptFunction();
 
 	System::Object^ Call(... cli::array<System::Object^>^ args);
 
@@ -32,6 +32,8 @@ public:
 	bool Equals(JavascriptFunction^ other);
 	
 	virtual bool Equals(Object^ other) override;
+    
+    void Destroy();
 
 private:
 	v8::Persistent<v8::Function>* mFuncHandle;

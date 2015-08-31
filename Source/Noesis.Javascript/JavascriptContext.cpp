@@ -38,6 +38,8 @@
 #include "JavascriptExternal.h"
 #include "JavascriptInterop.h"
 
+#include "libplatform/libplatform.h"
+
 using namespace msclr;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -57,8 +59,9 @@ static JavascriptContext::JavascriptContext()
 
     // Things say we should do this, but I cannot find it.  Perhaps it is
     // too new, or is old.
-    //v8::Platform* platform = v8::platform::CreateDefaultPlatform();
-    //v8::V8::InitializePlatform(platform);
+    platform = v8::platform::CreateDefaultPlatform();
+    v8::V8::InitializePlatform(platform);
+    v8::V8::Initialize();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -86,9 +89,23 @@ void JavascriptContext::FatalErrorCallbackMember(const char* location, const cha
 	}
 }
 
+class ArrayBufferAllocator : public v8::ArrayBuffer::Allocator {
+public:
+    virtual void* Allocate(size_t length) {
+        void* data = AllocateUninitialized(length);
+        return data == NULL ? data : memset(data, 0, length);
+    }
+    virtual void* AllocateUninitialized(size_t length) { return malloc(length); }
+    virtual void Free(void* data, size_t) { free(data); }
+};
+
 JavascriptContext::JavascriptContext()
 {
-    isolate = v8::Isolate::New();
+    ArrayBufferAllocator allocator;
+    Isolate::CreateParams create_params;
+    create_params.array_buffer_allocator = &allocator;
+    isolate = v8::Isolate::New(create_params);
+
 	v8::Locker v8ThreadLock(isolate);
 	v8::Isolate::Scope isolate_scope(isolate);
 
@@ -111,8 +128,35 @@ JavascriptContext::~JavascriptContext()
 		delete mContext;
 		delete mExternals;
 	}
-	if (isolate != NULL)
-		isolate->Dispose();
+
+    if (isolate != nullptr)
+    {
+        isolate->Dispose();
+        isolate = nullptr;
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+JavascriptContext::!JavascriptContext()
+{
+    {
+        v8::Locker v8ThreadLock(isolate);
+        v8::Isolate::Scope isolate_scope(isolate);
+        for each (WrappedJavascriptExternal wrapped in mExternals->Values)
+            delete wrapped.Pointer;
+        delete mContext;
+        delete mExternals;
+    }
+
+    if (isolate != nullptr)
+    {
+        if (isolate->IsExecutionTerminating())
+        {
+            isolate->TerminateExecution();
+        }
+        isolate = nullptr;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -168,7 +212,7 @@ JavascriptContext::SetParameter(System::String^ iName, System::Object^ iObject, 
 		}
 	}
 
-	Local<Context>::New(isolate, *mContext)->Global()->Set(String::NewFromTwoByte(isolate, (uint16_t*)name), value);
+    Local<Context>::New(isolate, *mContext)->Global()->Set(String::NewFromTwoByte(isolate, (uint16_t*)name), value);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -195,13 +239,14 @@ JavascriptContext::Run(System::String^ iScript)
 	wchar_t* script = (wchar_t*)scriptPtr;
 	JavascriptScope scope(this);
 	SetStackLimit();
-	HandleScope handleScope(JavascriptContext::GetCurrentIsolate());
+    v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+    HandleScope handleScope(isolate);
 	Local<Value> ret;
 	
 	Local<Script> compiledScript = CompileScript(script);
 
 	{
-		TryCatch tryCatch;
+        TryCatch tryCatch(isolate);
 		ret = (*compiledScript)->Run();
 
 		if (ret.IsEmpty())
@@ -222,13 +267,14 @@ JavascriptContext::Run(System::String^ iScript, System::String^ iScriptResourceN
 	wchar_t* scriptResourceName = (wchar_t*)scriptResourceNamePtr;
 	JavascriptScope scope(this);
 	SetStackLimit();
-	HandleScope handleScope(JavascriptContext::GetCurrentIsolate());
+    v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+    HandleScope handleScope(isolate);
 	Local<Value> ret;	
 
 	Local<Script> compiledScript = CompileScript(script, scriptResourceName);
 	
 	{
-		TryCatch tryCatch;
+        TryCatch tryCatch(isolate);
 		ret = (*compiledScript)->Run();
 
 		if (ret.IsEmpty())
@@ -247,7 +293,6 @@ JavascriptContext::SetStackLimit()
     // This stack limit needs to be set for each Run because the
     // stack of the caller could be in completely different spots (e.g.
     // different threads), or have moved up/down because calls/returns.
-	v8::ResourceConstraints rc;
 
     // Copied form v8/test/cctest/test-api.cc
     uint32_t size = 500000;
@@ -259,8 +304,7 @@ JavascriptContext::SetStackLimit()
     if (limit > &size)
         limit = reinterpret_cast<uint32_t*>(sizeof(size));
     
-    rc.set_stack_limit((uint32_t *)(limit));
-	v8::SetResourceConstraints(isolate, &rc);
+    GetCurrentIsolate()->SetStackLimit(reinterpret_cast<uintptr_t>(limit));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -313,7 +357,17 @@ JavascriptContext::Exit(v8::Locker *locker, JavascriptContext^ old_context)
 void
 JavascriptContext::Collect()
 {
-    while(!v8::V8::IdleNotification()) {}; 
+    while (!GetCurrentIsolate()->IdleNotificationDeadline(30)) {};
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void
+JavascriptContext::Destroy()
+{
+    V8::Dispose();
+    V8::ShutdownPlatform();
+    delete platform;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

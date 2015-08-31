@@ -128,6 +128,7 @@ public:
 	JavascriptContext();
 
 	~JavascriptContext();
+    !JavascriptContext();
 
 
 	////////////////////////////////////////////////////////////
@@ -153,6 +154,8 @@ public:
 
 	static void Collect();
 
+    static void Destroy();
+
 	// Fatal errors can occur when v8 runs out of memory.  Your process
 	// will exit immediately after this handler is called, because
 	// that's just how v8 works.
@@ -161,6 +164,7 @@ public:
 	// Call this just once for the whole library.
 	delegate void FatalErrorHandler(System::String^ location, System::String^ message);
 	static void SetFatalErrorHandler(FatalErrorHandler^ handler);
+
 
 	////////////////////////////////////////////////////////////
 	// Internal methods
@@ -207,6 +211,8 @@ protected:
 	[System::ThreadStaticAttribute] static JavascriptContext ^sCurrentContext;
 
 	static FatalErrorHandler^ fatalErrorHandler;
+
+    static v8::Platform* platform;
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

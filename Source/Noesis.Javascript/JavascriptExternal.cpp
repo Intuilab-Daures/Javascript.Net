@@ -59,6 +59,8 @@ JavascriptExternal::JavascriptExternal(System::Object^ iObject)
 
 JavascriptExternal::~JavascriptExternal()
 {
+    for each (WrappedMethod wrapped in mMethods->Values)
+        delete wrapped.Pointer;
 	mObjectHandle.Free();
 }
 
@@ -116,7 +118,7 @@ JavascriptExternal::GetMethod(wstring iName)
 Handle<Function>
 JavascriptExternal::GetMethod(Handle<String> iName)
 {
-	return GetMethod((wchar_t*) *String::Value(iName));
+	return GetMethod(wstring((wchar_t*) *String::Value(iName)));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
