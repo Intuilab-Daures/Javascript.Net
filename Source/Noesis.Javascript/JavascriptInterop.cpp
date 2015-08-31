@@ -49,16 +49,17 @@ using namespace System::Collections::Generic;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Persistent<ObjectTemplate>
+Handle<ObjectTemplate>
 JavascriptInterop::NewObjectWrapperTemplate()
 {
-	HandleScope handleScope;
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+	HandleScope handleScope(isolate);
 
 	Handle<ObjectTemplate> result = ObjectTemplate::New();
 	result->SetInternalFieldCount(1);
 	result->SetNamedPropertyHandler(Getter, Setter);
 	result->SetIndexedPropertyHandler(IndexGetter, IndexSetter);
-	return Persistent<ObjectTemplate>::New(handleScope.Close(result));
+	return result;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -74,10 +75,8 @@ JavascriptInterop::ConvertFromV8(Handle<Value> iValue)
 		return gcnew System::Int32(iValue->Int32Value());
 	if (iValue->IsNumber())
 		return gcnew System::Double(iValue->NumberValue());
-	if (iValue->IsString()){
-		System::String^ test = gcnew System::String((wchar_t*)*String::Value(iValue->ToString()));
+	if (iValue->IsString())
 		return gcnew System::String((wchar_t*)*String::Value(iValue->ToString()));
-	}
 	if (iValue->IsArray())
 		return ConvertArrayFromV8(iValue);
 	if (iValue->IsDate())
@@ -102,6 +101,7 @@ JavascriptInterop::ConvertFromV8(Handle<Value> iValue)
 Handle<Value>
 JavascriptInterop::ConvertToV8(System::Object^ iObject)
 {
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
 	if (iObject != nullptr)
 	{
 		System::Type^ type = iObject->GetType();
@@ -110,58 +110,59 @@ JavascriptInterop::ConvertToV8(System::Object^ iObject)
 		{
 			// Common types first.
 			if (type == System::Int32::typeid)
-				return v8::Int32::New(safe_cast<int>(iObject));
+				return v8::Int32::New(isolate, safe_cast<int>(iObject));
 			if (type == System::Double::typeid)
-				return v8::Number::New(safe_cast<double>(iObject));
+				return v8::Number::New(isolate, safe_cast<double>(iObject));
 			if (type == System::Boolean::typeid)
-				return v8::Boolean::New(safe_cast<bool>(iObject));
+				return v8::Boolean::New(isolate, safe_cast<bool>(iObject));
 			if (type->IsEnum)
 			{
 				// No equivalent to enum, so convert to a string.
 				pin_ptr<const wchar_t> valuePtr = PtrToStringChars(iObject->ToString());
 				wchar_t* value = (wchar_t*) valuePtr;
-				return v8::String::New((uint16_t*)value);
+				return v8::String::NewFromTwoByte(isolate, (uint16_t*)value);
 			}
 			else
 			{
 				if (type == System::Char::typeid)
 				{
 					uint16_t c = (uint16_t)safe_cast<wchar_t>(iObject);
-					return v8::String::New(&c, 1);
+					return v8::String::NewFromTwoByte(isolate, &c, v8::String::NewStringType::kNormalString, 1);
 				}
 				if (type == System::Int64::typeid)
-					return v8::Number::New((double)safe_cast<long long>(iObject));
+					return v8::Number::New(isolate, (double)safe_cast<long long>(iObject));
 				if (type == System::Int16::typeid)
-					return v8::Int32::New(safe_cast<short>(iObject));
+					return v8::Int32::New(isolate, safe_cast<short>(iObject));
 				if (type == System::SByte::typeid)
-					return v8::Int32::New(safe_cast<signed char>(iObject));
+					return v8::Int32::New(isolate, safe_cast<signed char>(iObject));
 				if (type == System::Byte::typeid)
-					return v8::Int32::New(safe_cast<unsigned char>(iObject));
+					return v8::Int32::New(isolate, safe_cast<unsigned char>(iObject));
 				if (type == System::UInt16::typeid)
-					return v8::Uint32::New(safe_cast<unsigned short>(iObject));
+					return v8::Uint32::New(isolate, safe_cast<unsigned short>(iObject));
 				if (type == System::UInt32::typeid)
-					return v8::Number::New(safe_cast<unsigned int>(iObject));  // I tried v8::Uint32, but it converted MaxInt to -1.
+					return v8::Number::New(isolate, safe_cast<unsigned int>(iObject));  // I tried v8::Uint32, but it converted MaxInt to -1.
 				if (type == System::UInt64::typeid)
-					return v8::Number::New((double)safe_cast<unsigned long long>(iObject));
+					return v8::Number::New(isolate, (double)safe_cast<unsigned long long>(iObject));
 				if (type == System::Single::typeid)
-					return v8::Number::New(safe_cast<float>(iObject));
+					return v8::Number::New(isolate, safe_cast<float>(iObject));
 				if (type == System::Decimal::typeid)
-					return v8::Number::New((double)safe_cast<System::Decimal>(iObject));
+					return v8::Number::New(isolate, (double)safe_cast<System::Decimal>(iObject));
 				if (type == System::DateTime::typeid)
-					return v8::Date::New(SystemInterop::ConvertFromSystemDateTime(safe_cast<System::DateTime^>(iObject)));
+					return v8::Date::New(isolate, SystemInterop::ConvertFromSystemDateTime(safe_cast<System::DateTime^>(iObject)));
 			}
 		}
 		if (type == System::String::typeid)
 		{
 			pin_ptr<const wchar_t> valuePtr = PtrToStringChars(safe_cast<System::String^>(iObject));
 			wchar_t* value = (wchar_t*) valuePtr;
-			return v8::String::New((uint16_t*)value);
+			return v8::String::NewFromTwoByte(isolate, (uint16_t*)value);
 		}
 		if (type->IsArray)
 			return ConvertFromSystemArray(safe_cast<System::Array^>(iObject));
 		if (System::Delegate::typeid->IsAssignableFrom(type))
 			return ConvertFromSystemDelegate(safe_cast<System::Delegate^>(iObject));
-		
+	
+	
 		if (type->IsGenericType)
 		{
 			if(type->GetGenericTypeDefinition() == System::Collections::Generic::Dictionary::typeid)
@@ -172,10 +173,33 @@ JavascriptInterop::ConvertToV8(System::Object^ iObject)
 				return ConvertFromSystemList(iObject);
 		}
 
+
+		if (System::Collections::IDictionary::typeid->IsAssignableFrom(type)){
+			//Only do this if no fields defined on this type
+			if (type->GetFields(System::Reflection::BindingFlags::DeclaredOnly | System::Reflection::BindingFlags::Instance )->Length == 0){
+				return ConvertFromSystemDictionary(iObject);
+			}
+		}
+
+		if (System::Exception::typeid->IsAssignableFrom(type))
+		{
+			// Converting exceptions to proper v8 Error objects has the advantage that
+			// they will come with stack traces.  We tuck the original Exception into
+			// the "InnerException" object so we can rethrow it back into C# land
+			// if necessary.
+			System::Exception ^exception = safe_cast<System::Exception^>(iObject);
+			pin_ptr<const wchar_t> valuePtr = PtrToStringChars(safe_cast<System::String^>(exception->Message));
+			wchar_t* value = (wchar_t*)valuePtr;
+			Handle<v8::Value> error = v8::Exception::Error(v8::String::NewFromTwoByte(isolate, (uint16_t*)value));
+			Handle<v8::Object> error_o = v8::Handle<v8::Object>::Cast(error);
+			error_o->Set(v8::String::NewFromUtf8(isolate, "InnerException"), WrapObject(iObject));
+			return error_o;
+		}
+
 		return WrapObject(iObject);
 	}
 
-	return Null();
+	return Null(isolate);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -190,7 +214,7 @@ JavascriptInterop::WrapObject(System::Object^ iObject)
 	{
 		Handle<ObjectTemplate> templ = context->GetObjectWrapperTemplate();
 		Handle<Object> object = templ->NewInstance();
-		object->SetInternalField(0, External::New(context->WrapObject(iObject)));
+		object->SetInternalField(0, External::New(JavascriptContext::GetCurrentIsolate(), context->WrapObject(iObject)));
 
 		return object;
 	}
@@ -249,12 +273,13 @@ JavascriptInterop::ConvertArrayFromV8(Handle<Value> iValue)
 System::Object^
 JavascriptInterop::ConvertObjectFromV8(Handle<Object> iObject)
 {
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
 	v8::Local<v8::Array> names = iObject->GetPropertyNames();
 	
 	unsigned int length = names->Length();
 	Dictionary<System::String^, System::Object^>^ results = gcnew Dictionary<System::String^, System::Object^>(length);
 	for (unsigned int i = 0; i < length; i++) {
-		v8::Handle<v8::Value> nameKey = v8::Uint32::New(i);
+		v8::Handle<v8::Value> nameKey = v8::Uint32::New(isolate, i);
 		v8::Handle<v8::Value> propName = names->Get(nameKey);
 		v8::Handle<v8::Value> propValue = iObject->Get(propName);
 
@@ -285,12 +310,13 @@ v8::Handle<v8::Value>
 JavascriptInterop::ConvertFromSystemArray(System::Array^ iArray) 
 {
 	int lenght = iArray->Length;
-	v8::Handle<v8::Array> result = v8::Array::New();
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+	v8::Handle<v8::Array> result = v8::Array::New(isolate);
 	
 	// Transform the .NET array into a Javascript array 
 	for (int i = 0; i < lenght; i++) 
 	{
-		v8::Handle<v8::Value> key = v8::Int32::New(i);
+		v8::Handle<v8::Value> key = v8::Int32::New(isolate, i);
 		result->Set(key, ConvertToV8(iArray->GetValue(i)));
 	}
 
@@ -302,7 +328,7 @@ JavascriptInterop::ConvertFromSystemArray(System::Array^ iArray)
 v8::Handle<v8::Value>
 JavascriptInterop::ConvertFromSystemDictionary(System::Object^ iObject) 
 {
-	v8::Handle<v8::Object> object = v8::Object::New();
+	v8::Handle<v8::Object> object = v8::Object::New(JavascriptContext::GetCurrentIsolate());
 	System::Collections::IDictionary^ dictionary =  safe_cast<System::Collections::IDictionary^>(iObject);
 
 	for each(System::Object^ keyValue in dictionary->Keys) 
@@ -312,6 +338,8 @@ JavascriptInterop::ConvertFromSystemDictionary(System::Object^ iObject)
 		object->Set(key, val);
 	} 
 
+
+
 	return object;
 }	
 
@@ -320,12 +348,13 @@ JavascriptInterop::ConvertFromSystemDictionary(System::Object^ iObject)
 v8::Handle<v8::Value>
 JavascriptInterop::ConvertFromSystemList(System::Object^ iObject) 
 {
-	v8::Handle<v8::Array> object = v8::Array::New();
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+	v8::Handle<v8::Array> object = v8::Array::New(isolate);
 	System::Collections::IList^ list =  safe_cast<System::Collections::IList^>(iObject);
 
 	for(int i = 0; i < list->Count; i++) 
 	{
-		v8::Handle<v8::Value> key = v8::Int32::New(i);
+		v8::Handle<v8::Value> key = v8::Int32::New(isolate, i);
 		v8::Handle<v8::Value> val = ConvertToV8(list[i]);
 		object->Set(key, val);
 	} 
@@ -339,22 +368,25 @@ v8::Handle<v8::Value>
 JavascriptInterop::ConvertFromSystemDelegate(System::Delegate^ iDelegate) 
 {
 	JavascriptContext^ context = JavascriptContext::GetCurrent();
-	v8::Handle<v8::External> external = v8::External::New(context->WrapObject(iDelegate));
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+	v8::Handle<v8::External> external = v8::External::New(isolate, context->WrapObject(iDelegate));
 
-	v8::Handle<v8::FunctionTemplate> method = v8::FunctionTemplate::New(DelegateInvoker, external);
+	v8::Handle<v8::FunctionTemplate> method = v8::FunctionTemplate::New(isolate, DelegateInvoker, external);
 	return method->GetFunction();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-v8::Handle<v8::Value> 
-JavascriptInterop::DelegateInvoker(const v8::Arguments& info)
+void
+JavascriptInterop::DelegateInvoker(const FunctionCallbackInfo<Value>& info)
 {
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
 	JavascriptExternal* wrapper = (JavascriptExternal*)v8::Handle<v8::External>::Cast(info.Data())->Value();
 	System::Object^ object = wrapper->GetObject();
 
 	System::Delegate^ delegat = static_cast<System::Delegate^>(object);
-	int nparams = delegat->GetType()->GetMethods()[0]->GetParameters()->Length;
+	cli::array<System::Reflection::ParameterInfo^>^ parametersInfo = delegat->GetType()->GetMethods()[0]->GetParameters();
+	int nparams = parametersInfo->Length;
 
 	// As is normal in JavaScript, we ignore excess input parameters, and pad
 	// with null if insufficient are supplied.
@@ -368,6 +400,22 @@ JavascriptInterop::DelegateInvoker(const v8::Arguments& info)
 			args[i] = nullptr;
 	}
 
+	// Perform type conversions where possible.
+	for (int i = 0; i < args->Length; i++)
+	{
+		if (args[i] != nullptr)
+		{
+			System::Type^ paramType = parametersInfo[i]->ParameterType;
+			System::Type^ suppliedType = args[i]->GetType();
+			if (suppliedType != paramType)
+			{
+				System::Object^ converted = SystemInterop::ConvertToType(args[i], paramType);
+				if (converted != nullptr)  // if conversion fails then leave original type in place so user get appropriate error message
+					args[i] = converted;
+			}
+		}
+	}
+
 	System::Object^ ret;
 	try
 	{
@@ -376,21 +424,24 @@ JavascriptInterop::DelegateInvoker(const v8::Arguments& info)
 	}
 	catch(System::Reflection::TargetInvocationException^ exception)
 	{
-		v8::ThrowException(JavascriptInterop::ConvertToV8(exception->InnerException));
+		info.GetReturnValue().Set(HandleTargetInvocationException(exception));
+		return;
 	}
 	catch(System::ArgumentException^)
 	{
 		// This is what we get when the arguments cannot be converted to match the
 		// delegate's requirements.  Its message is all about C# types so I don't
 		// pass it on.
-		return v8::ThrowException(JavascriptInterop::ConvertToV8("Argument mismatch"));
+		info.GetReturnValue().Set(isolate->ThrowException(JavascriptInterop::ConvertToV8("Argument mismatch")));
+		return;
 	}
 	catch(System::Exception^ exception)
 	{
-		v8::ThrowException(JavascriptInterop::ConvertToV8(exception));
+		info.GetReturnValue().Set(isolate->ThrowException(JavascriptInterop::ConvertToV8(exception)));
+		return;
 	}
 
-	return ConvertToV8(ret);
+	info.GetReturnValue().Set(ConvertToV8(ret));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -409,8 +460,8 @@ JavascriptInterop::IsSystemObject(Handle<Value> iValue)
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Handle<Value>
-JavascriptInterop::Getter(Local<String> iName, const AccessorInfo &iInfo)
+void
+JavascriptInterop::Getter(Local<String> iName, const PropertyCallbackInfo<Value>& iInfo)
 {
 	wstring name = (wchar_t*) *String::Value(iName);
 	Handle<External> external = Handle<External>::Cast(iInfo.Holder()->GetInternalField(0));
@@ -420,44 +471,52 @@ JavascriptInterop::Getter(Local<String> iName, const AccessorInfo &iInfo)
 
 	// get method
 	function = wrapper->GetMethod(name);
-	if (!function.IsEmpty())
-		return function;  // good value or exception
+	if (!function.IsEmpty()) {
+		iInfo.GetReturnValue().Set(function);  // good value or exception
+		return;
+	}
 
 	// As for GetMethod().
-	if (wrapper->GetProperty(name, value))
-		return value;  // good value or exception
+	if (wrapper->GetProperty(name, value)) {
+		iInfo.GetReturnValue().Set(value);  // good value or exception
+		return;
+	}
 
 	// map toString with ToString
 	if (wstring((wchar_t*) *String::Value(iName)) == L"toString")
 	{
 		function = wrapper->GetMethod(L"ToString");
-		if (!function.IsEmpty())
-			return function;
+		if (!function.IsEmpty()) {
+			iInfo.GetReturnValue().Set(function);
+			return;
+		}
 	}
 
 	// member not found
-	if ((wrapper->GetOptions() & SetParameterOptions::RejectUnknownProperties) == SetParameterOptions::RejectUnknownProperties)
-		return v8::ThrowException(JavascriptInterop::ConvertToV8("Unknown member: " + gcnew System::String((wchar_t*) *String::Value(iName))));
-	return Handle<Value>();
+	if ((wrapper->GetOptions() & SetParameterOptions::RejectUnknownProperties) == SetParameterOptions::RejectUnknownProperties) {
+		iInfo.GetReturnValue().Set(JavascriptContext::GetCurrentIsolate()->ThrowException(JavascriptInterop::ConvertToV8("Unknown member: " + gcnew System::String((wchar_t*) *String::Value(iName)))));
+		return;
+	}
+	iInfo.GetReturnValue().Set(Handle<Value>());
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Handle<Value>
-JavascriptInterop::Setter(Local<String> iName, Local<Value> iValue, const AccessorInfo& iInfo)
+void
+JavascriptInterop::Setter(Local<String> iName, Local<Value> iValue, const PropertyCallbackInfo<Value>& iInfo)
 {
 	wstring name = (wchar_t*) *String::Value(iName);
 	Handle<External> external = Handle<External>::Cast(iInfo.Holder()->GetInternalField(0));
 	JavascriptExternal* wrapper = (JavascriptExternal*) external->Value();
 	
 	// set property
-	return wrapper->SetProperty(name, iValue);
+	iInfo.GetReturnValue().Set(wrapper->SetProperty(name, iValue));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Handle<Value>
-JavascriptInterop::IndexGetter(uint32_t iIndex, const AccessorInfo &iInfo)
+void
+JavascriptInterop::IndexGetter(uint32_t iIndex, const PropertyCallbackInfo<Value> &iInfo)
 {
 	Handle<External> external = Handle<External>::Cast(iInfo.Holder()->GetInternalField(0));
 	JavascriptExternal* wrapper = (JavascriptExternal*) external->Value();
@@ -465,17 +524,19 @@ JavascriptInterop::IndexGetter(uint32_t iIndex, const AccessorInfo &iInfo)
 
 	// get property
 	value = wrapper->GetProperty(iIndex);
-	if (!value.IsEmpty())
-		return value;
+	if (!value.IsEmpty()) {
+		iInfo.GetReturnValue().Set(value);
+		return;
+	}
 
 	// member not found
-	return Handle<Value>();
+	iInfo.GetReturnValue().Set(Handle<Value>());
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Handle<Value>
-JavascriptInterop::IndexSetter(uint32_t iIndex, Local<Value> iValue, const AccessorInfo &iInfo)
+void
+JavascriptInterop::IndexSetter(uint32_t iIndex, Local<Value> iValue, const PropertyCallbackInfo<Value> &iInfo)
 {
 	Handle<External> external = Handle<External>::Cast(iInfo.Holder()->GetInternalField(0));
 	JavascriptExternal* wrapper = (JavascriptExternal*) external->Value();
@@ -483,18 +544,21 @@ JavascriptInterop::IndexSetter(uint32_t iIndex, Local<Value> iValue, const Acces
 
 	// get property
 	value = wrapper->SetProperty(iIndex, iValue);
-	if (!value.IsEmpty())
-		return value;
+	if (!value.IsEmpty()) {
+		iInfo.GetReturnValue().Set(value);
+		return;
+	}
 
 	// member not found
-	return Handle<Value>();
+	iInfo.GetReturnValue().Set(Handle<Value>());
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Handle<Value>
-JavascriptInterop::Invoker(const v8::Arguments& iArgs)
+void
+JavascriptInterop::Invoker(const v8::FunctionCallbackInfo<Value>& iArgs)
 {
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
 	System::Object^ data = UnwrapObject(Handle<External>::Cast(iArgs.Data()));
 	System::Reflection::MethodInfo^ bestMethod;
 	cli::array<System::Object^>^ suppliedArguments;
@@ -528,14 +592,18 @@ JavascriptInterop::Invoker(const v8::Arguments& iArgs)
 			cli::array<System::Reflection::ParameterInfo^>^ parametersInfo = method->GetParameters();
 			cli::array<System::Object^>^ arguments;
 
-			// match arguments & parameters counts
-			if (iArgs.Length() == parametersInfo->Length)
+			// Match arguments & parameters counts.  We will add nulls where
+            // we have insufficient parameters.  Note that this checking does
+            // not detect where nulls have been supplied (or insufficient parameters
+            // have been supplied), but the corresponding parameter cannot accept
+            // a null.  This will trigger an exception during invocation.
+			if (iArgs.Length() <= parametersInfo->Length)
 			{
 				int match = 0;
 				int failed = 0;
 
 				// match parameters
-				arguments = gcnew cli::array<System::Object^>(iArgs.Length());
+				arguments = gcnew cli::array<System::Object^>(parametersInfo->Length);  // trailing parameters will be null
 				for (int p = 0; p < suppliedArguments->Length; p++)
 				{
 					System::Type^ paramType = parametersInfo[p]->ParameterType;
@@ -572,10 +640,32 @@ JavascriptInterop::Invoker(const v8::Arguments& iArgs)
 					bestMethodArguments = arguments;
 					bestMethodMatchedArgs = match;
 				}
-
+				else if (match == bestMethodMatchedArgs)
+				{
+					if (suppliedArguments->Length == parametersInfo->Length) // Prefer method with the most matches and the same length of arguments
+					{
+						bestMethod = method;
+						bestMethodArguments = arguments;
+						bestMethodMatchedArgs = match;
+					}
+				}
+				
+				/*
+					THE CODE BELOW MAY CHOOSE A METHOD PREMATURLY
+					for example:
+					
+					public void test(string a, int b, bool c) { ... }
+					public void test(string a, int b, bool c, float d) { ... }
+					
+					and then invoke it this way in JavaScript:
+					
+					test("some text", 1234, true, 3.14);
+					
+					it'll invoke the first one instead of the second because it found 3 matches and there are 3 arguments.
+				*/
 				// skip lookup if all args matched
-				if (match == arguments->Length)
-					break;
+				//if (match == arguments->Length)
+					//break;
 			}
 		}
 	}
@@ -589,18 +679,38 @@ JavascriptInterop::Invoker(const v8::Arguments& iArgs)
 		}
 		catch(System::Reflection::TargetInvocationException^ exception)
 		{
-			v8::ThrowException(JavascriptInterop::ConvertToV8(exception->InnerException));
+			iArgs.GetReturnValue().Set(HandleTargetInvocationException(exception));
+			return;
 		}
 		catch(System::Exception^ exception)
 		{
-			v8::ThrowException(JavascriptInterop::ConvertToV8(exception));
+			iArgs.GetReturnValue().Set(isolate->ThrowException(JavascriptInterop::ConvertToV8(exception)));
+			return;
 		}
 	}
-	else
-		v8::ThrowException(JavascriptInterop::ConvertToV8("Argument mismatch for method \"" + memberName + "\"."));
+	else {
+		iArgs.GetReturnValue().Set(isolate->ThrowException(JavascriptInterop::ConvertToV8("Argument mismatch for method \"" + memberName + "\".")));
+		return;
+	}
 	
 	// return value
-	return ConvertToV8(ret);
+	iArgs.GetReturnValue().Set(ConvertToV8(ret));
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+Handle<Value>
+JavascriptInterop::HandleTargetInvocationException(System::Reflection::TargetInvocationException^ exception)
+{
+    if (JavascriptContext::GetCurrent()->IsExecutionTerminating())
+        // As per comment in V8::TerminateExecution() we should just
+        // return here, to allow v8 to keep unwinding its stack.
+        // That is, TerminateExecution terminates the whole stack,
+        // not just until we notice it in C++ land.
+        return Handle<Value>();
+    else
+	    return JavascriptContext::GetCurrentIsolate()->ThrowException(JavascriptInterop::ConvertToV8(exception->InnerException));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

@@ -21,7 +21,7 @@ namespace Noesis.Javascript.Tests
             GC.Collect();
             decimal diffMBytes = (Process.GetCurrentProcess().PrivateMemorySize64 - mem) / 1048576m;
 
-            Assert.That(diffMBytes, Is.LessThan(1), "{0:0.00}MB left allocated", diffMBytes);
+            Assert.That(diffMBytes < 1, String.Format("{0:0.00}MB left allocated", diffMBytes));
         }
 
         private static void MemoryUsageLoadInstance()

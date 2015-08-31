@@ -29,6 +29,7 @@
 #include <msclr\lock.h>
 #include <vcclr.h>
 #include <msclr\marshal.h>
+#include <signal.h>
 
 #include "JavascriptContext.h"
 
@@ -45,15 +46,57 @@ namespace Noesis { namespace Javascript {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static DWORD curThreadId;
+static JavascriptContext::JavascriptContext()
+{
+    // If we don't initialize the ICU the calls to locale-specific functions
+    // (e.g. new Date().toLocaleString()) will cause an segmentation fault.
+    // Probably not after I added -Dv8_enable_i18n_support=0 to the gyp
+    // command line, but it's still good to have this here in case someone
+    // compiles with internationalization turned on.
+    v8::V8::InitializeICU();
+
+    // Things say we should do this, but I cannot find it.  Perhaps it is
+    // too new, or is old.
+    //v8::Platform* platform = v8::platform::CreateDefaultPlatform();
+    //v8::V8::InitializePlatform(platform);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Static function so it can be called from unmanaged code.
+void FatalErrorCallback(const char* location, const char* message)
+{
+	JavascriptContext::FatalErrorCallbackMember(location, message);
+	raise(SIGABRT);  // Exit immediately.
+}
+
+void JavascriptContext::FatalErrorCallbackMember(const char* location, const char* message)
+{
+	// Let's hope Out of Memory doesn't stop us allocating these strings!
+	// I guess we can generally count on the garbage collector to find
+	// us something, because it didn't have a chance to get involved if v8
+	// has just run out.
+	System::String ^location_str = gcnew System::String(location);
+	System::String ^message_str = gcnew System::String(message);
+	if (fatalErrorHandler != nullptr) {
+		fatalErrorHandler(location_str, message_str);
+	} else {
+		System::Console::WriteLine(location_str);
+		System::Console::WriteLine(message_str);
+	}
+}
 
 JavascriptContext::JavascriptContext()
 {
-	isolate = v8::Isolate::New();
+    isolate = v8::Isolate::New();
 	v8::Locker v8ThreadLock(isolate);
 	v8::Isolate::Scope isolate_scope(isolate);
-	mExternals = new vector<JavascriptExternal*>();
-	mContext = new Persistent<Context>(Context::New());
+
+    V8::SetFatalErrorHandler(FatalErrorCallback);
+
+	mExternals = gcnew System::Collections::Generic::Dictionary<System::Object ^, WrappedJavascriptExternal>();
+	HandleScope scope(isolate);
+	mContext = new Persistent<Context>(isolate, Context::New(isolate));
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -63,8 +106,8 @@ JavascriptContext::~JavascriptContext()
 	{
 		v8::Locker v8ThreadLock(isolate);
 		v8::Isolate::Scope isolate_scope(isolate);
-		mContext->Dispose();
-		Clear();
+		for each (WrappedJavascriptExternal wrapped in mExternals->Values)
+			delete wrapped.Pointer;
 		delete mContext;
 		delete mExternals;
 	}
@@ -74,9 +117,23 @@ JavascriptContext::~JavascriptContext()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+void JavascriptContext::SetFatalErrorHandler(FatalErrorHandler^ handler)
+{
+	fatalErrorHandler = handler;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void JavascriptContext::TerminateExecution()
 {
 	v8::V8::TerminateExecution(isolate);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+bool JavascriptContext::IsExecutionTerminating()
+{
+	return v8::V8::IsExecutionTerminating(isolate);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -95,7 +152,8 @@ JavascriptContext::SetParameter(System::String^ iName, System::Object^ iObject, 
 	pin_ptr<const wchar_t> namePtr = PtrToStringChars(iName);
 	wchar_t* name = (wchar_t*) namePtr;
 	JavascriptScope scope(this);
-	HandleScope handleScope;
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+	HandleScope handleScope(isolate);
 	
 	Handle<Value> value = JavascriptInterop::ConvertToV8(iObject);
 
@@ -110,7 +168,7 @@ JavascriptContext::SetParameter(System::String^ iName, System::Object^ iObject, 
 		}
 	}
 
-	(*mContext)->Global()->Set(String::New((uint16_t*)name), value);
+	Local<Context>::New(isolate, *mContext)->Global()->Set(String::NewFromTwoByte(isolate, (uint16_t*)name), value);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -121,9 +179,10 @@ JavascriptContext::GetParameter(System::String^ iName)
 	pin_ptr<const wchar_t> namePtr = PtrToStringChars(iName);
 	wchar_t* name = (wchar_t*) namePtr;
 	JavascriptScope scope(this);
-	HandleScope handleScope;
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+	HandleScope handleScope(isolate);
 	
-	Local<Value> value = (*mContext)->Global()->Get(String::New((uint16_t*)name));
+	Local<Value> value = Local<Context>::New(isolate, *mContext)->Global()->Get(String::NewFromTwoByte(isolate, (uint16_t*)name));
 	return JavascriptInterop::ConvertFromV8(value);
 }
 
@@ -136,7 +195,7 @@ JavascriptContext::Run(System::String^ iScript)
 	wchar_t* script = (wchar_t*)scriptPtr;
 	JavascriptScope scope(this);
 	SetStackLimit();
-	HandleScope handleScope;
+	HandleScope handleScope(JavascriptContext::GetCurrentIsolate());
 	Local<Value> ret;
 	
 	Local<Script> compiledScript = CompileScript(script);
@@ -163,7 +222,7 @@ JavascriptContext::Run(System::String^ iScript, System::String^ iScriptResourceN
 	wchar_t* scriptResourceName = (wchar_t*)scriptResourceNamePtr;
 	JavascriptScope scope(this);
 	SetStackLimit();
-	HandleScope handleScope;
+	HandleScope handleScope(JavascriptContext::GetCurrentIsolate());
 	Local<Value> ret;	
 
 	Local<Script> compiledScript = CompileScript(script, scriptResourceName);
@@ -181,21 +240,27 @@ JavascriptContext::Run(System::String^ iScript, System::String^ iScriptResourceN
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+
 void
 JavascriptContext::SetStackLimit()
 {
-    // v8 Needs to have its stack limit set separately in each thread because
-	// it detects stack overflows by reference to a stack pointer that it
-	// calculates when it is first invoked.  We recalculate the stack pointer
-	// for each thread.
-	DWORD dw = GetCurrentThreadId();
-	if (dw != curThreadId) {
-		v8::ResourceConstraints rc;
-		int limit = (int)&rc - 500000;
-		rc.set_stack_limit((uint32_t *)(limit));
-		v8::SetResourceConstraints(&rc);
-		curThreadId = dw;
-	}
+    // This stack limit needs to be set for each Run because the
+    // stack of the caller could be in completely different spots (e.g.
+    // different threads), or have moved up/down because calls/returns.
+	v8::ResourceConstraints rc;
+
+    // Copied form v8/test/cctest/test-api.cc
+    uint32_t size = 500000;
+    uint32_t* limit = &size - (size / sizeof(size));
+    // If the size is very large and the stack is very near the bottom of
+    // memory then the calculation above may wrap around and give an address
+    // that is above the (downwards-growing) stack.  In that case we return
+    // a very low address.
+    if (limit > &size)
+        limit = reinterpret_cast<uint32_t*>(sizeof(size));
+    
+    rc.set_stack_limit((uint32_t *)(limit));
+	v8::SetResourceConstraints(isolate, &rc);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -208,40 +273,38 @@ JavascriptContext::GetCurrent()
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
+v8::Isolate *
+JavascriptContext::GetCurrentIsolate()
+{
+	return sCurrentContext->isolate;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
 v8::Locker *
-JavascriptContext::Enter()
+JavascriptContext::Enter([System::Runtime::InteropServices::Out] JavascriptContext^% old_context)
 {
 	v8::Locker *locker = new v8::Locker(isolate);
 	isolate->Enter();
-	// We store the old context so that JavascriptContexts can be created and run
-	// recursively.
-	oldContext = sCurrentContext;
+    old_context = sCurrentContext;
 	sCurrentContext = this;
-	(*mContext)->Enter();
+	HandleScope scope(isolate);
+	Local<Context>::New(isolate, *mContext)->Enter();
 	return locker;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void
-JavascriptContext::Exit(v8::Locker *locker)
+JavascriptContext::Exit(v8::Locker *locker, JavascriptContext^ old_context)
 {
-	(*mContext)->Exit();
-	sCurrentContext = oldContext;
+	{
+		HandleScope scope(isolate);
+		Local<Context>::New(isolate, *mContext)->Exit();
+	}
+	sCurrentContext = old_context;
 	isolate->Exit();
 	delete locker;
-}
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-void
-JavascriptContext::Clear()
-{
-	while (mExternals->size())
-	{
-		delete mExternals->back();
-		mExternals->pop_back();
-	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -258,9 +321,18 @@ JavascriptContext::Collect()
 JavascriptExternal*
 JavascriptContext::WrapObject(System::Object^ iObject)
 {
-	JavascriptExternal* external = new JavascriptExternal(iObject);
-	mExternals->push_back(external);
-	return external;
+	WrappedJavascriptExternal external_wrapped;
+	if (mExternals->TryGetValue(iObject, external_wrapped))
+	{
+		// We've wrapped this guy before.
+		return external_wrapped.Pointer;
+	}
+	else
+	{
+		JavascriptExternal* external = new JavascriptExternal(iObject);
+		mExternals[iObject] = WrappedJavascriptExternal(external);
+		return external;
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -268,13 +340,9 @@ JavascriptContext::WrapObject(System::Object^ iObject)
 Handle<ObjectTemplate>
 JavascriptContext::GetObjectWrapperTemplate()
 {
-	// It would be better if this were cached to avoid recreating it each time,
-	// but you cannot include a Persistent<> in JavascriptContext because it is
-	// an unmanaged type, and you cannot put it in a static variable (as used to
-	// happen) because the wrapper is only valid for the isolate in which it
-	// was created.  I tried storing a pointer to a Persistent<>, but I got
-	// a heap mismatch when reusing it.  I'm not sure why.
-	return JavascriptInterop::NewObjectWrapperTemplate();
+	if (objectWrapperTemplate == NULL)
+		objectWrapperTemplate = new Persistent<ObjectTemplate>(isolate, JavascriptInterop::NewObjectWrapperTemplate());
+	return Local<ObjectTemplate>::New(isolate, *objectWrapperTemplate);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -290,7 +358,8 @@ Local<Script>
 CompileScript(wchar_t const *source_code, wchar_t const *resource_name)
 {
 	// convert source
-	Local<String> source = String::New((uint16_t const *)source_code);
+	v8::Isolate *isolate = JavascriptContext::GetCurrentIsolate();
+	Local<String> source = String::NewFromTwoByte(isolate, (uint16_t const *)source_code);
 
 	// compile
 	{
@@ -303,7 +372,7 @@ CompileScript(wchar_t const *source_code, wchar_t const *resource_name)
 		}
 		else
 		{
-			Local<String> resource = String::New((uint16_t const *)resource_name);
+			Local<String> resource = String::NewFromTwoByte(isolate, (uint16_t const *)resource_name);
 			script = Script::Compile(source, resource);
 		}
 
@@ -313,8 +382,6 @@ CompileScript(wchar_t const *source_code, wchar_t const *resource_name)
 		return script;
 	}
 }
-
-////////////////////////////////////////////////////////////////////////////////////////////////////
 
 } } // namespace Noesis::Javascript
 

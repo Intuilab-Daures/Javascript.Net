@@ -34,8 +34,8 @@ namespace Noesis.Javascript.Tests
         {
             _context.SetParameter("obj", new ClassWithIndexer());
 
-            Assert.That(() => _context.Run("obj[1] = 123 /* passing int when expecting string */"), 
-                Throws.InstanceOf<JavascriptException>().With.Message.Matches("Method .+ not found"));
+            Assert.That(() => _context.Run("obj[1] = 123 /* passing int when expecting string */"),
+                Throws.InstanceOf<JavascriptException>().With.Message.Matches("Object of type 'System.Int32' cannot be converted to type 'System.String"));
         }
 
         class ClassWithMethods
@@ -60,6 +60,13 @@ namespace Noesis.Javascript.Tests
 
             Assert.That(() => _context.Run("obj.MethodThatThrows()"),
                         Throws.InstanceOf<JavascriptException>().With.Message.EqualTo("Test C# exception"));
+        }
+
+        [Test]
+        public void StackOverflow()
+        {
+            Assert.That(() => _context.Run("function f() { f(); }; f();"),
+                        Throws.InstanceOf<JavascriptException>().With.Message.EqualTo("RangeError: Maximum call stack size exceeded"));
         }
     }
 }
